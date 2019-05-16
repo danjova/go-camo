@@ -1,3 +1,5 @@
+github.com/DataDog/datadog-go v2.2.0+incompatible h1:V5BKkxACZLjzHjSgBbr2gvLA2Ae49yhc6CSY7MLy5k4=
+github.com/DataDog/datadog-go v2.2.0+incompatible/go.mod h1:LButxg5PwREeZtORoXG3tL4fMGNddJ+vMq1mwgfaqoQ=
 github.com/cactus/mlog v1.0.1 h1:86eVRQ7m9RaD2oayGiPcMz6uy8RJYKjI1zlejemkCUU=
 github.com/cactus/mlog v1.0.1/go.mod h1:AJd8Wr+LFfIG6gD8nF356EVpQ1i04/dgYfaMlMCj1ns=
 github.com/cactus/tai64 v1.0.0 h1:2G/693el0FjkhychJt8iBkCXa9OOxcs5Py5+6v3gypw=

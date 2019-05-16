@@ -50,6 +50,9 @@ func main() {
 		ServerName          string        `long:"server-name" default:"go-camo" description:"Value to use for the HTTP server field"`
 		ExposeServerVersion bool          `long:"expose-server-version" description:"Include the server version in the HTTP server response header"`
 		EnableXFwdFor       bool          `long:"enable-xfwd4" description:"Enable x-forwarded-for passthrough/generation"`
+		StatsdHost          string        `long:"statsd-host" description:"Statsd hostname to use"`
+		StatsdPort          int64         `long:"statsd-port" description:"Statsd port to use"`
+		StatsdEnabled       bool          `long:"enable-statsd" description:"Enable statsd interface for datadog"`
 	}
 
 	// parse said flags
@@ -87,6 +90,25 @@ func main() {
 	mlog.SetFlags(0)
 
 	config := camo.Config{}
+
+	config.StatsdEnabled = opts.StatsdEnabled
+
+	if opts.StatsdHost != "" {
+		config.StatsdHost = opts.StatsdHost
+	} else {
+		config.StatsdHost = "127.0.0.1"
+	}
+
+	if opts.StatsdPort != 0 {
+		config.StatsdPort = opts.StatsdPort
+	} else {
+		config.StatsdPort = 8125
+	}
+
+	if opts.StatsdEnabled {
+		mlog.Printf("Sending statsd metrics to %s:%d", config.StatsdHost, config.StatsdPort)
+	}
+
 	if hmacKey := os.Getenv("GOCAMO_HMAC"); hmacKey != "" {
 		config.HMACKey = []byte(hmacKey)
 	}

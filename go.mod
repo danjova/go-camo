@@ -1,6 +1,7 @@
 module github.com/cactus/go-camo
 
 require (
+	github.com/DataDog/datadog-go v2.2.0+incompatible
 	github.com/cactus/mlog v1.0.1
 	github.com/cactus/tai64 v1.0.0 // indirect
 	github.com/davecgh/go-spew v1.1.0 // indirect

@@ -8,7 +8,9 @@ package camo
 
 import (
 	"errors"
+	"fmt"
 	"io"
+	"log"
 	"net"
 	"net/http"
 	"net/url"
@@ -17,8 +19,9 @@ import (
 	"time"
 
 	"github.com/cactus/go-camo/pkg/camo/encoding"
-
 	"github.com/cactus/mlog"
+
+	statsd "github.com/DataDog/datadog-go/statsd"
 )
 
 // Config holds configuration data used when creating a Proxy with New.
@@ -47,6 +50,10 @@ type Config struct {
 	AllowContentVideo bool
 	// no ip filtering (test mode)
 	noIPFiltering bool
+
+	StatsdEnabled bool
+	StatsdHost    string
+	StatsdPort    int64
 }
 
 // ProxyMetrics interface for Proxy to use for stats/metrics.
@@ -74,6 +81,16 @@ type Proxy struct {
 // valid requests to the desired endpoint. Responses are filtered for
 // proper image content types.
 func (p *Proxy) ServeHTTP(w http.ResponseWriter, req *http.Request) {
+	statsdEnabled := p.config.StatsdEnabled
+
+	statsdClient, err := statsd.New(
+		fmt.Sprintf("%s:%d", p.config.StatsdHost, p.config.StatsdPort),
+		statsd.WithNamespace("camo."),
+	)
+	if err != nil {
+		log.Fatal(err)
+	}
+
 	if p.metrics != nil {
 		p.metrics.AddServed()
 	}
@@ -83,6 +100,9 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 	}
 
 	if req.Header.Get("Via") == p.config.ServerName {
+		if statsdEnabled {
+			statsdClient.Incr("http.request.error", []string{"error:request_loop"}, 1)
+		}
 		http.Error(w, "Request loop failure", http.StatusNotFound)
 		return
 	}
@@ -90,6 +110,9 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 	// split path and get components
 	components := strings.Split(req.URL.Path, "/")
 	if len(components) < 3 {
+		if statsdEnabled {
+			statsdClient.Incr("http.request.error", []string{"error:malformed_url"}, 1)
+		}
 		http.Error(w, "Malformed request path", http.StatusNotFound)
 		return
 	}
@@ -99,6 +122,9 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 
 	sURL, ok := encoding.DecodeURL(p.config.HMACKey, sigHash, encodedURL)
 	if !ok {
+		if statsdEnabled {
+			statsdClient.Incr("http.request.error", []string{"error:bad_signature"}, 1)
+		}
 		http.Error(w, "Bad Signature", http.StatusForbidden)
 		return
 	}
@@ -107,6 +133,9 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 
 	u, err := url.Parse(sURL)
 	if err != nil {
+		if statsdEnabled {
+			statsdClient.Incr("http.request.error", []string{"error:url_parse_error"}, 1)
+		}
 		mlog.Debugm("url parse error", mlog.Map{"err": err})
 		http.Error(w, "Bad url", http.StatusBadRequest)
 		return
@@ -114,6 +143,9 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 
 	uHostname := strings.ToLower(u.Hostname())
 	if uHostname == "" || localhostRegex.MatchString(uHostname) {
+		if statsdEnabled {
+			statsdClient.Incr("http.request.error", []string{"error:bad_url_host"}, 1)
+		}
 		http.Error(w, "Bad url host", http.StatusNotFound)
 		return
 	}
@@ -123,6 +155,9 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 		// if allowList is set, require match
 		for _, rgx := range p.allowList {
 			if rgx.MatchString(uHostname) {
+				if statsdEnabled {
+					statsdClient.Incr("http.request.error", []string{"error:allowlist_host_failure"}, 1)
+				}
 				http.Error(w, "Allowlist host failure", http.StatusNotFound)
 				return
 			}
@@ -131,6 +166,9 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 		// filter out rejected networks
 		if ip := net.ParseIP(uHostname); ip != nil {
 			if isRejectedIP(ip) {
+				if statsdEnabled {
+					statsdClient.Incr("http.request.error", []string{"error:denylist_host_failure"}, 1)
+				}
 				http.Error(w, "Denylist host failure", http.StatusNotFound)
 				return
 			}
@@ -138,6 +176,9 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 			if ips, err := net.LookupIP(uHostname); err == nil {
 				for _, ip := range ips {
 					if isRejectedIP(ip) {
+						if statsdEnabled {
+							statsdClient.Incr("http.request.error", []string{"error:denylist_host_failure"}, 1)
+						}
 						http.Error(w, "Denylist host failure", http.StatusNotFound)
 						return
 					}
@@ -148,6 +189,9 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 
 	nreq, err := http.NewRequest(req.Method, sURL, nil)
 	if err != nil {
+		if statsdEnabled {
+			statsdClient.Incr("http.request.error", []string{"error:fetch_resource_failure"}, 1)
+		}
 		mlog.Debugm("could not create NewRequest", mlog.Map{"err": err})
 		http.Error(w, "Error Fetching Resource", http.StatusBadGateway)
 		return
@@ -200,11 +244,20 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 		// go 1.4 has this as net.OpError
 		// and the error strings are different depending on which version too.
 		if strings.Contains(errString, "timeout") || strings.Contains(errString, "Client.Timeout") {
+			if statsdEnabled {
+				statsdClient.Incr("http.request.error", []string{"error:timeout"}, 1)
+			}
 			http.Error(w, "Error Fetching Resource", http.StatusGatewayTimeout)
 		} else if strings.Contains(errString, "use of closed") {
+			if statsdEnabled {
+				statsdClient.Incr("http.request.error", []string{"error:connection_closed"}, 1)
+			}
 			http.Error(w, "Error Fetching Resource", http.StatusBadGateway)
 		} else {
 			// some other error. call it a not found (camo compliant)
+			if statsdEnabled {
+				statsdClient.Incr("http.request.error", []string{"error:unknown_failure"}, 1)
+			}
 			http.Error(w, "Error Fetching Resource", http.StatusNotFound)
 		}
 		return
@@ -214,6 +267,9 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 
 	// check for too large a response
 	if resp.ContentLength > p.config.MaxSize {
+		if statsdEnabled {
+			statsdClient.Incr("http.request.error", []string{"error:content_length_exceeded"}, 1)
+		}
 		mlog.Debugm("content length exceeded", mlog.Map{"url": sURL})
 		http.Error(w, "Content length exceeded", http.StatusNotFound)
 		return
@@ -225,11 +281,22 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 		match := false
 		for _, re := range p.acceptTypesRe {
 			if re.MatchString(resp.Header.Get("Content-Type")) {
+				if statsdEnabled {
+					statsdClient.Gauge(
+						"http.response.size",
+						float64(resp.ContentLength),
+						[]string{},
+						1,
+					)
+				}
 				match = true
 				break
 			}
 		}
 		if !match {
+			if statsdEnabled {
+				statsdClient.Incr("http.request.error", []string{"error:unsupported_content_type"}, 1)
+			}
 			mlog.Debugm("Unsupported content-type returned", mlog.Map{"type": u})
 			http.Error(w, "Unsupported content-type returned", http.StatusBadRequest)
 			return
@@ -238,23 +305,38 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 		http.Error(w, "Multiple choices not supported", http.StatusNotFound)
 		return
 	case 301, 302, 303, 307:
+		if statsdEnabled {
+			statsdClient.Incr("http.response.status", []string{"http_status:redirect"}, 1)
+		}
 		// if we get a redirect here, we either disabled following,
 		// or followed until max depth and still got one (redirect loop)
 		http.Error(w, "Not Found", http.StatusNotFound)
 		return
 	case 304:
+		if statsdEnabled {
+			statsdClient.Incr("http.response.status", []string{"http_status:not_modified"}, 1)
+		}
 		h := w.Header()
 		p.copyHeaders(&h, &resp.Header, &ValidRespHeaders)
 		w.WriteHeader(304)
 		return
 	case 404:
+		if statsdEnabled {
+			statsdClient.Incr("http.response.status", []string{"http_status:not_found"}, 1)
+		}
 		http.Error(w, "Not Found", http.StatusNotFound)
 		return
 	case 500, 502, 503, 504:
+		if statsdEnabled {
+			statsdClient.Incr("http.response.status", []string{"http_status:server_error"}, 1)
+		}
 		// upstream errors should probably just 502. client can try later.
 		http.Error(w, "Error Fetching Resource", http.StatusBadGateway)
 		return
 	default:
+		if statsdEnabled {
+			statsdClient.Incr("http.response", []string{"http_status:unknown_response"}, 1)
+		}
 		http.Error(w, "Not Found", http.StatusNotFound)
 		return
 	}
@@ -270,9 +352,15 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 	if err != nil {
 		// only log broken pipe errors at debug level
 		if isBrokenPipe(err) {
+			if statsdEnabled {
+				statsdClient.Incr("http.response.error", []string{"error:broken_pipe"}, 1)
+			}
 			mlog.Debugm("error writing response", mlog.Map{"err": err})
 		} else {
 			// unknown error and not a broken pipe
+			if statsdEnabled {
+				statsdClient.Incr("http.response.error", []string{"error:failed_to_write_response"}, 1)
+			}
 			mlog.Printm("error writing response", mlog.Map{"err": err})
 		}
 
